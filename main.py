@@ -1,22 +1,23 @@
+import requests
 import discord
 from discord import app_commands
 from discord.ext import commands
 
-# Bot intents
+
 intents = discord.Intents.default()
 intents.message_content = True
 intents.voice_states = True
 
-# Admin rol ismi
-ADMIN_ROLE_NAME = "Admin"
 
-# Bot sınıfı
+ADMIN_ROLE_NAME = "admin rolü"
+
+
 class MyBot(commands.Bot):
     def __init__(self):
         super().__init__(command_prefix="!", intents=intents)
 
     async def setup_hook(self):
-        GUILD_ID =   # kendi sunucunun ID
+        GUILD_ID = # GUILD ID 
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
@@ -137,5 +138,4 @@ bot.tree.add_command(ban)
 bot.tree.add_command(help)
 bot.tree.add_command(sunucubilgisi)
 
-# Botu çalıştır
-bot.run("tokengos here")
+bot.run("tokenhere")
