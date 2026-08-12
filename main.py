@@ -1,37 +1,165 @@
-import requests
+import logging
+import os
+
 import discord
 from discord import app_commands
-from discord.ext import commands
+from dotenv import load_dotenv
+
+import storage
+
+load_dotenv()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+log = logging.getLogger("667bot")
 
 
+def _require(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        raise SystemExit(f"{name} tanımlı değil. .env dosyasını kontrol et.")
+    return value
+
+
+TOKEN = _require("DISCORD_TOKEN")
+GUILD_ID = int(_require("GUILD_ID"))
+ADMIN_ROLE_ID = os.getenv("ADMIN_ROLE_ID")
+ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "admin rolü")
+CONFIG_CHANNEL_ID = os.getenv("CONFIG_CHANNEL_ID")
+DATA_PATH = os.getenv("DATA_PATH", "data/roles.json")
+
+store = storage.ReactionRoleStore(
+    int(CONFIG_CHANNEL_ID) if CONFIG_CHANNEL_ID else None, DATA_PATH
+)
+
+# message_content'e ihtiyacımız yok (prefix komut kullanmıyoruz), members ise
+# tepki kaldırıldığında üyeyi bulabilmek için gerekli.
 intents = discord.Intents.default()
-intents.message_content = True
+intents.members = True
 intents.voice_states = True
+intents.reactions = True
 
 
-ADMIN_ROLE_NAME = "admin rolü"
+class MyBot(discord.Client):
+    """Sadece slash komut kullandığımız için commands.Bot yerine düz Client.
 
+    commands.Bot prefix komutları için message_content intent'i bekliyor ve
+    her açılışta gereksiz bir uyarı basıyordu.
+    """
 
-class MyBot(commands.Bot):
     def __init__(self):
-        super().__init__(command_prefix="!", intents=intents)
+        super().__init__(intents=intents)
+        self.tree = RestrictedTree(self)
 
     async def setup_hook(self):
-        GUILD_ID = # GUILD ID 
+        await store.load(self)
         guild = discord.Object(id=GUILD_ID)
         self.tree.copy_global_to(guild=guild)
         await self.tree.sync(guild=guild)
 
+
+def has_access(user: discord.abc.User) -> bool:
+    """Komutları yalnızca yetkili rol çalıştırabilir.
+
+    Sunucu yöneticiliği bilerek muafiyet sayılmıyor: yetki tek bir role bağlı.
+    Rol silinir veya ADMIN_ROLE_ID yanlış girilirse hiç kimse komut
+    çalıştıramaz, bu durumda ortam değişkenini düzeltip botu yeniden başlat.
+    """
+    if not isinstance(user, discord.Member):
+        return False
+    if ADMIN_ROLE_ID:
+        return any(role.id == int(ADMIN_ROLE_ID) for role in user.roles)
+    return any(role.name == ADMIN_ROLE_NAME for role in user.roles)
+
+
+class RestrictedTree(app_commands.CommandTree):
+    """Tüm slash komutlar için tek yetki kontrol noktası.
+
+    Kontrolü komut komut yazmak yerine burada topluyoruz; böylece yeni bir
+    komut eklendiğinde kontrolü koymayı unutmak mümkün olmuyor.
+    """
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.guild_id != GUILD_ID:
+            await interaction.response.send_message(
+                "Bu bot yalnızca kendi sunucusunda çalışır.", ephemeral=True
+            )
+            return False
+
+        if not has_access(interaction.user):
+            log.warning(
+                "Yetkisiz komut denemesi: %s (%s) -> /%s",
+                interaction.user,
+                interaction.user.id,
+                interaction.command.name if interaction.command else "?",
+            )
+            await interaction.response.send_message(
+                "Bu botu kullanma yetkin yok.", ephemeral=True
+            )
+            return False
+
+        return True
+
+
 bot = MyBot()
 
-def is_admin(interaction: discord.Interaction) -> bool:
-    return any(role.name == ADMIN_ROLE_NAME for role in interaction.user.roles)
+
+# Rol dağıtımıyla yetki yükseltilmesini engellemek için: bu yetkilerden birine
+# sahip bir rol butonla/tepkiyle dağıtılamaz.
+DANGEROUS_PERMISSIONS = (
+    "administrator",
+    "manage_guild",
+    "manage_roles",
+    "manage_channels",
+    "manage_webhooks",
+    "manage_messages",
+    "ban_members",
+    "kick_members",
+    "moderate_members",
+    "mention_everyone",
+)
+
+
+def role_problem(me: discord.Member, role: discord.Role) -> str | None:
+    """Rol dağıtıma uygun mu? Uygunsa None, değilse sebebi döner."""
+    if not me.guild_permissions.manage_roles:
+        return "Rol dağıtabilmem için `Rolleri Yönet` yetkisine ihtiyacım var."
+    if role.is_default():
+        return "@everyone rolü dağıtılamaz."
+    if role.managed:
+        return f"**{role.name}** bir entegrasyon rolü, Discord elle verilmesine izin vermiyor."
+    if role >= me.top_role:
+        return (
+            f"**{role.name}** benim rolümden yüksek, veremem. "
+            "Sunucu ayarlarından benim rolümü bu rolün üstüne taşı."
+        )
+
+    granted = [p for p in DANGEROUS_PERMISSIONS if getattr(role.permissions, p)]
+    if granted:
+        return (
+            f"**{role.name}** yetkili bir rol ({', '.join(granted)}). "
+            "Herkesin tıklayabildiği bir panelden dağıtılırsa yetki yükseltmeye "
+            "açık hale gelir, bu yüzden engellendi."
+        )
+    return None
+
 
 @bot.event
 async def on_ready():
-    print(f"Logged in as {bot.user}")
+    log.info("Giriş yapıldı: %s", bot.user)
     activity = discord.Game(name="revorevorevorevo")
     await bot.change_presence(status=discord.Status.online, activity=activity)
+
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    """Bot başka bir sunucuya eklenirse orada çalışmasın."""
+    if guild.id != GUILD_ID:
+        log.warning("İzinsiz sunucuya eklendi, çıkılıyor: %s (%s)", guild.name, guild.id)
+        await guild.leave()
+
 
 # ------------------- /join -------------------
 @app_commands.command(name="join", description="Botu ses kanalına sok")
@@ -51,6 +179,7 @@ async def join(interaction: discord.Interaction, channel: discord.VoiceChannel =
 
     await interaction.response.send_message(f"**{channel.name}** joined")
 
+
 # ------------------- /leave -------------------
 @app_commands.command(name="leave", description="Botu ses kanalından çıkar")
 async def leave(interaction: discord.Interaction):
@@ -62,80 +191,356 @@ async def leave(interaction: discord.Interaction):
     await voice_client.disconnect()
     await interaction.response.send_message("leave")
 
+
 # ------------------- /mesajyaz -------------------
 @app_commands.command(name="mesajyaz", description="Bot mesaj gönderir")
 @app_commands.describe(mesaj="Botun göndereceği mesaj")
 async def mesajyaz(interaction: discord.Interaction, mesaj: str):
-    await interaction.response.send_message(f"{mesaj}")
+    # Botun @everyone ping'i için kullanılmasını engelle.
+    await interaction.response.send_message(
+        mesaj, allowed_mentions=discord.AllowedMentions.none()
+    )
+
 
 # ------------------- /nuke -------------------
 @app_commands.command(name="nuke", description="Yazılı kanalı temizle")
 @app_commands.describe(channel="Temizlenecek yazılı kanal")
 async def nuke(interaction: discord.Interaction, channel: discord.TextChannel):
-    if not is_admin(interaction):
-        await interaction.response.send_message("Bu komutu kullanmak için yönetici olmalısın.", ephemeral=True)
-        return
-
     category = channel.category
     position = channel.position
     overwrites = channel.overwrites
 
     await interaction.response.send_message(f"nukelaniyor {channel.name}", ephemeral=True)
 
-    # Kanalı sil
     await channel.delete()
 
     new_channel = await interaction.guild.create_text_channel(
         name=channel.name,
         category=category,
         overwrites=overwrites,
-        position=position
+        position=position,
     )
 
     await new_channel.send(f"nuked by {interaction.user.mention}")
+
 
 # ------------------- /ban -------------------
 @app_commands.command(name="ban", description="Kullanıcıyı banla")
 @app_commands.describe(user="Banlanacak kullanıcı", reason="Ban sebebi (opsiyonel)")
 async def ban(interaction: discord.Interaction, user: discord.User, reason: str = None):
-    if not is_admin(interaction):
-        await interaction.response.send_message("Bu komutu kullanmak için yönetici olmalısın.", ephemeral=True)
-        return
-    
     try:
         await interaction.guild.ban(user, reason=reason)
-        await interaction.response.send_message(f"{user.mention} başarıyla banlandı. Sebep: {reason or 'Belirtilmedi'}")
     except discord.Forbidden:
-        await interaction.response.send_message("Bu kullanıcıyı banlamak için yetkim yok.", ephemeral=True)
+        await interaction.response.send_message(
+            "Bu kullanıcıyı banlamak için yetkim yok.", ephemeral=True
+        )
+        return
+
+    await interaction.response.send_message(
+        f"{user.mention} başarıyla banlandı. Sebep: {reason or 'Belirtilmedi'}",
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+# ------------------- /rolpanel -------------------
+class RolePanel(discord.ui.View):
+    """Kalıcı buton paneli.
+
+    Butonlara callback bağlamıyoruz; tıklamalar custom_id üzerinden
+    on_interaction içinde işleniyor. Böylece bot yeniden başladığında
+    eski paneller çalışmaya devam ediyor.
+    """
+
+    def __init__(self, roles: list[discord.Role]):
+        super().__init__(timeout=None)
+        for role in roles:
+            self.add_item(
+                discord.ui.Button(
+                    # Discord buton etiketini 80 karakterle sınırlıyor
+                    label=role.name[:80],
+                    custom_id=f"rr:{role.id}",
+                    style=discord.ButtonStyle.secondary,
+                )
+            )
+
+
+@app_commands.command(name="rolpanel", description="Butonla rol alma mesajı oluştur")
+@app_commands.describe(
+    baslik="Panelin başlığı",
+    aciklama="Panelin açıklaması",
+    rol1="Dağıtılacak rol",
+    rol2="Dağıtılacak rol (opsiyonel)",
+    rol3="Dağıtılacak rol (opsiyonel)",
+    rol4="Dağıtılacak rol (opsiyonel)",
+    rol5="Dağıtılacak rol (opsiyonel)",
+)
+async def rolpanel(
+    interaction: discord.Interaction,
+    baslik: str,
+    aciklama: str,
+    rol1: discord.Role,
+    rol2: discord.Role = None,
+    rol3: discord.Role = None,
+    rol4: discord.Role = None,
+    rol5: discord.Role = None,
+):
+    roles = [r for r in (rol1, rol2, rol3, rol4, rol5) if r is not None]
+
+    me = interaction.guild.me
+    for role in roles:
+        problem = role_problem(me, role)
+        if problem:
+            await interaction.response.send_message(problem, ephemeral=True)
+            return
+
+    embed = discord.Embed(title=baslik, description=aciklama, color=0x00FF00)
+    await interaction.channel.send(embed=embed, view=RolePanel(roles))
+    await interaction.response.send_message("Panel oluşturuldu.", ephemeral=True)
+
+
+@bot.event
+async def on_interaction(interaction: discord.Interaction):
+    if interaction.type is not discord.InteractionType.component:
+        return
+
+    custom_id = (interaction.data or {}).get("custom_id", "")
+    if not custom_id.startswith("rr:"):
+        return
+
+    # Butonlar sunucu üyelerine açık (rol panelinin amacı bu), ama yalnızca
+    # kendi sunucumuzda ve yalnızca güvenli roller için.
+    if interaction.guild_id != GUILD_ID or not isinstance(interaction.user, discord.Member):
+        return
+
+    role = interaction.guild.get_role(int(custom_id[3:]))
+    if role is None:
+        await interaction.response.send_message("Bu rol artık mevcut değil.", ephemeral=True)
+        return
+
+    problem = role_problem(interaction.guild.me, role)
+    if problem:
+        log.warning("Panelden dağıtılamayan rol: %s (%s)", role.name, problem)
+        await interaction.response.send_message(
+            "Bu rol artık dağıtıma uygun değil, bir yetkiliye bildir.", ephemeral=True
+        )
+        return
+
+    try:
+        if role in interaction.user.roles:
+            await interaction.user.remove_roles(role, reason="Rol paneli")
+            await interaction.response.send_message(
+                f"**{role.name}** rolü alındı.", ephemeral=True
+            )
+        else:
+            await interaction.user.add_roles(role, reason="Rol paneli")
+            await interaction.response.send_message(
+                f"**{role.name}** rolü verildi.", ephemeral=True
+            )
+    except discord.Forbidden:
+        await interaction.response.send_message(
+            "Bu rolü yönetme yetkim yok. Rolüm bu rolün üstünde olmalı.", ephemeral=True
+        )
+
+
+# ------------------- /roltepki -------------------
+def render_emoji(key: str) -> str:
+    """Depolama anahtarını görüntülenebilir emojiye çevirir."""
+    if key.isdigit():
+        emoji = bot.get_emoji(int(key))
+        return str(emoji) if emoji else f"<:emoji:{key}>"
+    return key
+
+
+def describe_mapping(guild: discord.Guild, mapping: dict[str, int]) -> str:
+    lines = [
+        f"{render_emoji(key)} → {role.mention if (role := guild.get_role(rid)) else '*silinmiş rol*'}"
+        for key, rid in mapping.items()
+    ]
+    return "\n".join(lines) or "—"
+
+
+@app_commands.command(name="roltepki", description="Bir mesaja emoji tepkisiyle rol ekle")
+@app_commands.describe(
+    emoji="Tıklanacak emoji",
+    rol="Verilecek rol",
+    mesaj_id="Tepki eklenecek mesajın ID'si. Boş bırakırsan yeni bir mesaj oluşturur.",
+    baslik="Yeni mesaj oluşturulacaksa başlığı",
+)
+async def roltepki(
+    interaction: discord.Interaction,
+    emoji: str,
+    rol: discord.Role,
+    mesaj_id: str = None,
+    baslik: str = "Rol Al",
+):
+    problem = role_problem(interaction.guild.me, rol)
+    if problem:
+        await interaction.response.send_message(problem, ephemeral=True)
+        return
+
+    if mesaj_id:
+        try:
+            message = await interaction.channel.fetch_message(int(mesaj_id))
+        except (ValueError, discord.NotFound):
+            await interaction.response.send_message(
+                "Mesaj bulunamadı. Komutu mesajın bulunduğu kanalda çalıştır.", ephemeral=True
+            )
+            return
+    else:
+        message = await interaction.channel.send(
+            embed=discord.Embed(
+                title=baslik,
+                description="Aşağıdaki emojiye tıklayarak rolü alabilirsin.",
+                color=0x00FF00,
+            )
+        )
+
+    try:
+        await message.add_reaction(emoji)
+    except discord.HTTPException:
+        await interaction.response.send_message(
+            "Bu emojiyi ekleyemedim. Başka bir sunucunun özel emojisi olabilir.", ephemeral=True
+        )
+        return
+
+    try:
+        await store.set(message.id, storage.emoji_key(emoji), rol.id)
+    except ValueError as exc:
+        await interaction.response.send_message(str(exc), ephemeral=True)
+        return
+
+    await interaction.response.send_message(
+        f"{emoji} → **{rol.name}** eklendi. Mesaj ID: `{message.id}`\n"
+        f"Bu mesajdaki eşleşmeler:\n{describe_mapping(interaction.guild, store.mapping_for(message.id))}",
+        ephemeral=True,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
+
+
+@app_commands.command(name="roltepkisil", description="Emoji-rol eşleşmesini kaldır")
+@app_commands.describe(mesaj_id="Mesajın ID'si", emoji="Kaldırılacak emoji")
+async def roltepkisil(interaction: discord.Interaction, mesaj_id: str, emoji: str):
+    try:
+        message_id = int(mesaj_id)
+    except ValueError:
+        await interaction.response.send_message("Geçersiz mesaj ID'si.", ephemeral=True)
+        return
+
+    if not await store.remove(message_id, storage.emoji_key(emoji)):
+        await interaction.response.send_message("Böyle bir eşleşme yok.", ephemeral=True)
+        return
+
+    # Mesaj başka kanalda olabilir; tepkiyi temizleyebilirsek temizleyelim.
+    try:
+        message = await interaction.channel.fetch_message(message_id)
+        await message.clear_reaction(emoji)
+    except discord.HTTPException:
+        pass
+
+    await interaction.response.send_message("Eşleşme kaldırıldı.", ephemeral=True)
+
+
+async def _handle_reaction(payload: discord.RawReactionActionEvent, add: bool) -> None:
+    if payload.guild_id != GUILD_ID or payload.user_id == bot.user.id:
+        return
+
+    role_id = store.get(payload.message_id, storage.emoji_key(payload.emoji))
+    if role_id is None:
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    if guild is None:
+        return
+
+    role = guild.get_role(role_id)
+    if role is None:
+        return
+
+    problem = role_problem(guild.me, role)
+    if problem:
+        log.warning("Tepkiyle dağıtılamayan rol: %s (%s)", role.name, problem)
+        return
+
+    member = payload.member or guild.get_member(payload.user_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except discord.HTTPException:
+            return
+
+    if member.bot:
+        return
+
+    try:
+        if add:
+            await member.add_roles(role, reason="Tepki rolü")
+        else:
+            await member.remove_roles(role, reason="Tepki rolü")
+    except discord.Forbidden:
+        log.warning("%s rolü yönetilemedi: yetki yok veya rol hiyerarşisi engelliyor", role.name)
+
+
+@bot.event
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    await _handle_reaction(payload, add=True)
+
+
+@bot.event
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    await _handle_reaction(payload, add=False)
+
 
 # ------------------- /help -------------------
 @app_commands.command(name="help", description="Komut yardım menüsü")
 async def help(interaction: discord.Interaction):
-    embed = discord.Embed(title="Yardım Menüsü", description="Mevcut komutlar:", color=0x00ff00)
+    embed = discord.Embed(title="Yardım Menüsü", description="Mevcut komutlar:", color=0x00FF00)
     embed.add_field(name="/join", value="Botu ses kanalına sokar", inline=False)
     embed.add_field(name="/leave", value="Botu ses kanalından çıkarır", inline=False)
     embed.add_field(name="/mesajyaz", value="Bot mesaj gönderir", inline=False)
-    embed.add_field(name="/nuke", value="Yazılı kanalı temizler", inline=False)
+    embed.add_field(name="/nuke", value="Yazılı kanalı temizler (sadece Admin)", inline=False)
     embed.add_field(name="/ban", value="Kullanıcıyı banlar (sadece Admin)", inline=False)
     embed.add_field(name="/sunucubilgisi", value="Sunucu hakkında bilgi verir", inline=False)
+    embed.add_field(
+        name="/rolpanel", value="Butonla rol alma mesajı oluşturur (sadece Admin)", inline=False
+    )
+    embed.add_field(
+        name="/roltepki",
+        value="Emoji tepkisiyle rol veren mesaj oluşturur (sadece Admin)",
+        inline=False,
+    )
+    embed.add_field(
+        name="/roltepkisil", value="Emoji-rol eşleşmesini kaldırır (sadece Admin)", inline=False
+    )
     await interaction.response.send_message(embed=embed)
+
 
 # ------------------- /sunucubilgisi -------------------
 @app_commands.command(name="sunucubilgisi", description="Sunucu hakkında bilgi verir")
 async def sunucubilgisi(interaction: discord.Interaction):
     guild = interaction.guild
-    embed = discord.Embed(title=f"{guild.name} Bilgileri", color=0x00ff00)
+    embed = discord.Embed(title=f"{guild.name} Bilgileri", color=0x00FF00)
     embed.add_field(name="Üye Sayısı", value=guild.member_count, inline=True)
-    embed.add_field(name="Oluşturulma Tarihi", value=guild.created_at.strftime("%d/%m/%Y"), inline=True)
+    embed.add_field(
+        name="Oluşturulma Tarihi", value=guild.created_at.strftime("%d/%m/%Y"), inline=True
+    )
     embed.add_field(name="Boost Sayısı", value=guild.premium_subscription_count, inline=True)
     await interaction.response.send_message(embed=embed)
 
-bot.tree.add_command(join)
-bot.tree.add_command(leave)
-bot.tree.add_command(mesajyaz)
-bot.tree.add_command(nuke)
-bot.tree.add_command(ban)
-bot.tree.add_command(help)
-bot.tree.add_command(sunucubilgisi)
 
-bot.run("tokenhere")
+for command in (
+    join,
+    leave,
+    mesajyaz,
+    nuke,
+    ban,
+    help,
+    sunucubilgisi,
+    rolpanel,
+    roltepki,
+    roltepkisil,
+):
+    bot.tree.add_command(command)
+
+# log_handler=None: discord.py kendi handler'ını kurmasın, yukarıdaki
+# basicConfig yeterli (aksi halde her satır iki kez basılıyor).
+bot.run(TOKEN, log_handler=None)

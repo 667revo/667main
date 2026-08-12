@@ -1,0 +1,26 @@
+[Unit]
+Description=667 Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+# Discord tarafında kesinti olursa sürekli yeniden başlatıp rate limit yemeyelim
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=revo667
+WorkingDirectory=/opt/667bot
+EnvironmentFile=/opt/667bot/.env
+ExecStart=/opt/667bot/venv/bin/python -u main.py
+
+Restart=always
+RestartSec=10
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target
