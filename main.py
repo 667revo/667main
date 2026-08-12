@@ -30,6 +30,9 @@ ADMIN_ROLE_NAME = os.getenv("ADMIN_ROLE_NAME", "admin rolü")
 CONFIG_CHANNEL_ID = os.getenv("CONFIG_CHANNEL_ID")
 DATA_PATH = os.getenv("DATA_PATH", "data/roles.json")
 
+# Tüm embed'lerin kenar rengi (koyu mor)
+EMBED_COLOR = 0x5B2C6F
+
 store = storage.ReactionRoleStore(
     int(CONFIG_CHANNEL_ID) if CONFIG_CHANNEL_ID else None, DATA_PATH
 )
@@ -293,7 +296,7 @@ async def rolpanel(
             await interaction.response.send_message(problem, ephemeral=True)
             return
 
-    embed = discord.Embed(title=baslik, description=aciklama, color=0x00FF00)
+    embed = discord.Embed(title=baslik, description=aciklama, color=EMBED_COLOR)
     await interaction.channel.send(embed=embed, view=RolePanel(roles))
     await interaction.response.send_message("Panel oluşturuldu.", ephemeral=True)
 
@@ -391,7 +394,7 @@ async def roltepki(
             embed=discord.Embed(
                 title=baslik,
                 description="Aşağıdaki emojiye tıklayarak rolü alabilirsin.",
-                color=0x00FF00,
+                color=EMBED_COLOR,
             )
         )
 
@@ -493,7 +496,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 # ------------------- /help -------------------
 @app_commands.command(name="help", description="Komut yardım menüsü")
 async def help(interaction: discord.Interaction):
-    embed = discord.Embed(title="Yardım Menüsü", description="Mevcut komutlar:", color=0x00FF00)
+    embed = discord.Embed(title="Yardım Menüsü", description="Mevcut komutlar:", color=EMBED_COLOR)
     embed.add_field(name="/join", value="Botu ses kanalına sokar", inline=False)
     embed.add_field(name="/leave", value="Botu ses kanalından çıkarır", inline=False)
     embed.add_field(name="/mesajyaz", value="Bot mesaj gönderir", inline=False)
@@ -518,7 +521,7 @@ async def help(interaction: discord.Interaction):
 @app_commands.command(name="sunucubilgisi", description="Sunucu hakkında bilgi verir")
 async def sunucubilgisi(interaction: discord.Interaction):
     guild = interaction.guild
-    embed = discord.Embed(title=f"{guild.name} Bilgileri", color=0x00FF00)
+    embed = discord.Embed(title=f"{guild.name} Bilgileri", color=EMBED_COLOR)
     embed.add_field(name="Üye Sayısı", value=guild.member_count, inline=True)
     embed.add_field(
         name="Oluşturulma Tarihi", value=guild.created_at.strftime("%d/%m/%Y"), inline=True
