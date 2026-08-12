@@ -174,13 +174,16 @@ async def join(interaction: discord.Interaction, channel: discord.VoiceChannel =
             return
         channel = interaction.user.voice.channel
 
+    # Ses bağlantısı 3 saniyelik interaction penceresini aşabiliyor.
+    await interaction.response.defer()
+
     voice_client = interaction.guild.voice_client
     if voice_client:
         await voice_client.move_to(channel)
     else:
         await channel.connect()
 
-    await interaction.response.send_message(f"**{channel.name}** joined")
+    await interaction.followup.send(f"**{channel.name}** joined")
 
 
 # ------------------- /leave -------------------
@@ -191,8 +194,9 @@ async def leave(interaction: discord.Interaction):
         await interaction.response.send_message("ses kanalinda degilim.", ephemeral=True)
         return
 
+    await interaction.response.defer()
     await voice_client.disconnect()
-    await interaction.response.send_message("leave")
+    await interaction.followup.send("leave")
 
 
 # ------------------- /mesajyaz -------------------
@@ -231,15 +235,17 @@ async def nuke(interaction: discord.Interaction, channel: discord.TextChannel):
 @app_commands.command(name="ban", description="Kullanıcıyı banla")
 @app_commands.describe(user="Banlanacak kullanıcı", reason="Ban sebebi (opsiyonel)")
 async def ban(interaction: discord.Interaction, user: discord.User, reason: str = None):
+    await interaction.response.defer()
+
     try:
         await interaction.guild.ban(user, reason=reason)
     except discord.Forbidden:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Bu kullanıcıyı banlamak için yetkim yok.", ephemeral=True
         )
         return
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"{user.mention} başarıyla banlandı. Sebep: {reason or 'Belirtilmedi'}",
         allowed_mentions=discord.AllowedMentions.none(),
     )
@@ -296,9 +302,13 @@ async def rolpanel(
             await interaction.response.send_message(problem, ephemeral=True)
             return
 
+    # Paneli göndermek bir HTTP çağrısı; önce defer etmezsek 3 saniyelik
+    # interaction penceresi dolup 10062 (Unknown interaction) alıyoruz.
+    await interaction.response.defer(ephemeral=True)
+
     embed = discord.Embed(title=baslik, description=aciklama, color=EMBED_COLOR)
     await interaction.channel.send(embed=embed, view=RolePanel(roles))
-    await interaction.response.send_message("Panel oluşturuldu.", ephemeral=True)
+    await interaction.followup.send("Panel oluşturuldu.", ephemeral=True)
 
 
 @bot.event
@@ -328,19 +338,19 @@ async def on_interaction(interaction: discord.Interaction):
         )
         return
 
+    # Rol ekleme/çıkarma bir HTTP çağrısı; buton tıklamalarında da 3 saniyelik
+    # pencere geçerli olduğu için önce defer ediyoruz.
+    await interaction.response.defer(ephemeral=True)
+
     try:
         if role in interaction.user.roles:
             await interaction.user.remove_roles(role, reason="Rol paneli")
-            await interaction.response.send_message(
-                f"**{role.name}** rolü alındı.", ephemeral=True
-            )
+            await interaction.followup.send(f"**{role.name}** rolü alındı.", ephemeral=True)
         else:
             await interaction.user.add_roles(role, reason="Rol paneli")
-            await interaction.response.send_message(
-                f"**{role.name}** rolü verildi.", ephemeral=True
-            )
+            await interaction.followup.send(f"**{role.name}** rolü verildi.", ephemeral=True)
     except discord.Forbidden:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Bu rolü yönetme yetkim yok. Rolüm bu rolün üstünde olmalı.", ephemeral=True
         )
 
@@ -381,11 +391,15 @@ async def roltepki(
         await interaction.response.send_message(problem, ephemeral=True)
         return
 
+    # Aşağıda birkaç HTTP çağrısı var; 3 saniyelik pencereyi aşmamak için
+    # önce defer ediyoruz.
+    await interaction.response.defer(ephemeral=True)
+
     if mesaj_id:
         try:
             message = await interaction.channel.fetch_message(int(mesaj_id))
         except (ValueError, discord.NotFound):
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "Mesaj bulunamadı. Komutu mesajın bulunduğu kanalda çalıştır.", ephemeral=True
             )
             return
@@ -401,7 +415,7 @@ async def roltepki(
     try:
         await message.add_reaction(emoji)
     except discord.HTTPException:
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "Bu emojiyi ekleyemedim. Başka bir sunucunun özel emojisi olabilir.", ephemeral=True
         )
         return
@@ -409,10 +423,10 @@ async def roltepki(
     try:
         await store.set(message.id, storage.emoji_key(emoji), rol.id)
     except ValueError as exc:
-        await interaction.response.send_message(str(exc), ephemeral=True)
+        await interaction.followup.send(str(exc), ephemeral=True)
         return
 
-    await interaction.response.send_message(
+    await interaction.followup.send(
         f"{emoji} → **{rol.name}** eklendi. Mesaj ID: `{message.id}`\n"
         f"Bu mesajdaki eşleşmeler:\n{describe_mapping(interaction.guild, store.mapping_for(message.id))}",
         ephemeral=True,
@@ -429,8 +443,10 @@ async def roltepkisil(interaction: discord.Interaction, mesaj_id: str, emoji: st
         await interaction.response.send_message("Geçersiz mesaj ID'si.", ephemeral=True)
         return
 
+    await interaction.response.defer(ephemeral=True)
+
     if not await store.remove(message_id, storage.emoji_key(emoji)):
-        await interaction.response.send_message("Böyle bir eşleşme yok.", ephemeral=True)
+        await interaction.followup.send("Böyle bir eşleşme yok.", ephemeral=True)
         return
 
     # Mesaj başka kanalda olabilir; tepkiyi temizleyebilirsek temizleyelim.
@@ -440,7 +456,7 @@ async def roltepkisil(interaction: discord.Interaction, mesaj_id: str, emoji: st
     except discord.HTTPException:
         pass
 
-    await interaction.response.send_message("Eşleşme kaldırıldı.", ephemeral=True)
+    await interaction.followup.send("Eşleşme kaldırıldı.", ephemeral=True)
 
 
 async def _handle_reaction(payload: discord.RawReactionActionEvent, add: bool) -> None:
