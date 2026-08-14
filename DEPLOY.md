@@ -63,9 +63,10 @@ birkaç saniyelik kesinti dışında etkisi olmaz.
 ### Kalıcılık — `CONFIG_CHANNEL_ID`
 
 Heroku'nun dosya sistemi geçicidir; her yeniden başlatmada sıfırlanır. Bu yüzden emoji-rol
-eşleşmeleri diske değil, **Discord'un kendisine** yazılır: bot, `CONFIG_CHANNEL_ID` ile
-verdiğin kanalda tek bir "durum mesajı" tutar ve eşleşmeler değiştikçe onu günceller.
-Veritabanı eklentisi gerekmiyor, deploy'lar ve dyno döngüsü eşleşmeleri bozmuyor.
+eşleşmeleri ve bot ayarları (örn. `/guildrolesetup` ile seçilen guild rolü) diske değil,
+**Discord'un kendisine** yazılır: bot, `CONFIG_CHANNEL_ID` ile verdiğin kanalda tek bir
+"durum mesajı" tutar ve veri değiştikçe onu günceller. Veritabanı eklentisi gerekmiyor,
+deploy'lar ve dyno döngüsü kayıtları bozmuyor.
 
 Üyelere kapalı bir kanal aç (örn. `#bot-config`), ID'sini kopyala ve ayarla:
 
@@ -73,11 +74,14 @@ Veritabanı eklentisi gerekmiyor, deploy'lar ve dyno döngüsü eşleşmeleri bo
 heroku config:set CONFIG_CHANNEL_ID=kanal_id
 ```
 
-Bu kanaldaki `667bot-state` ile başlayan mesajı **silme** — tüm eşleşmeler orada.
+Bu kanaldaki `667bot-state` ile başlayan mesajı **silme** — tüm eşleşmeler ve ayarlar orada.
 Durum mesajı 2000 karakterle sınırlı; pratikte ~50 eşleşme sığar, dolarsa bot uyarır.
 
 `CONFIG_CHANNEL_ID` boş bırakılırsa yerel `data/roles.json` dosyasına düşer. Bu yalnızca
-kendi sunucunda veya yerelde işe yarar; Heroku'da her yeniden başlatmada eşleşmeler silinir.
+kendi sunucunda veya yerelde işe yarar; Heroku'da her yeniden başlatmada kayıtlar silinir.
+
+Durum mesajının biçimi `{"reactions": {...}, "settings": {...}}` şeklindedir. Eski
+(yalnızca eşleşme içeren) mesajlar da okunur, elle dönüştürmen gerekmez.
 
 ## 3. Yerelde çalıştırma
 
@@ -101,3 +105,13 @@ sudo cp 667bot.service /etc/systemd/system/ && sudo systemctl enable --now 667bo
 ```
 
 Servis boot'ta başlar, çökerse 10 saniyede geri gelir. `journalctl -u 667bot -f` ile log izlenir.
+
+## 5. Kod düzeni
+
+Giriş noktası her ortamda `main.py` (Procfile, systemd servisi ve yerel çalıştırma bunu
+kullanır). Komutlar `src/commands/` klasöründen otomatik yüklenir; yeni komut eklerken
+deploy tarafında değiştirmen gereken bir şey yok — sadece dosyayı ekleyip botu yeniden
+başlat. Ayrıntı: [README.md](README.md#yeni-komut-ekleme).
+
+`src/` klasörünün tamamının deploy'a dahil olduğundan emin ol (Heroku'da `git add -A`,
+VM'de `/opt/667bot` altına kopyalarken klasörü de al).

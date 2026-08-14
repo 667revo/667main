@@ -36,13 +36,15 @@ class ReactionRoleStore:
         self.channel_id = channel_id
         self.path = path
         self._data: dict[str, dict[str, int]] = {}
+        # Tepki-rol dışındaki kalıcı ayarlar (ör. guild etiketi rolü).
+        self._settings: dict[str, object] = {}
         self._message: discord.Message | None = None
 
     # ------------------- yükleme -------------------
 
     async def load(self, bot: discord.Client) -> None:
         if not self.channel_id:
-            self._data = self._read_file()
+            self._data, self._settings = self._read_file()
             log.warning(
                 "CONFIG_CHANNEL_ID tanımlı değil, yerel dosya kullanılıyor (%s). "
                 "Heroku'da bu dosya her yeniden başlatmada silinir.",
@@ -55,7 +57,7 @@ class ReactionRoleStore:
         async for message in channel.history(limit=50):
             if message.author.id == bot.user.id and message.content.startswith(MARKER):
                 self._message = message
-                self._data = self._parse(message.content)
+                self._data, self._settings = self._parse(message.content)
                 log.info("Durum mesajı bulundu, %d mesaj için eşleşme yüklendi", len(self._data))
                 return
 
@@ -85,20 +87,49 @@ class ReactionRoleStore:
         await self._persist()
         return True
 
+    # ------------------- ayarlar -------------------
+
+    def setting(self, key: str, default=None):
+        return self._settings.get(key, default)
+
+    async def set_setting(self, key: str, value) -> None:
+        """Ayarı kaydeder. value None ise ayar tamamen silinir."""
+        if value is None:
+            self._settings.pop(key, None)
+        else:
+            self._settings[key] = value
+        await self._persist()
+
     # ------------------- iç işler -------------------
 
+    def _payload(self) -> dict:
+        return {"reactions": self._data, "settings": self._settings}
+
     def _render(self) -> str:
-        return f"{MARKER}\n```json\n{json.dumps(self._data, ensure_ascii=False)}\n```"
+        return f"{MARKER}\n```json\n{json.dumps(self._payload(), ensure_ascii=False)}\n```"
 
     @staticmethod
-    def _parse(content: str) -> dict[str, dict[str, int]]:
+    def _split(data: dict) -> tuple[dict[str, dict[str, int]], dict[str, object]]:
+        """Yeni ve eski kayıt biçimini tek biçime indirger.
+
+        Eski kayıtlar doğrudan {mesaj_id: {emoji: rol_id}} şeklindeydi; ayarlar
+        eklenince {"reactions": ..., "settings": ...} biçimine geçtik. Eski
+        durum mesajları da okunabilsin diye ikisini de destekliyoruz.
+        """
+        if isinstance(data.get("reactions"), dict):
+            settings = data.get("settings")
+            return data["reactions"], settings if isinstance(settings, dict) else {}
+        return data, {}
+
+    @classmethod
+    def _parse(cls, content: str) -> tuple[dict[str, dict[str, int]], dict[str, object]]:
         _, _, rest = content.partition("```json\n")
         payload, _, _ = rest.partition("\n```")
         try:
-            return json.loads(payload) if payload else {}
+            return cls._split(json.loads(payload) if payload else {})
         except json.JSONDecodeError:
             log.error("Durum mesajı okunamadı, boş başlanıyor")
-            return {}
+            return {}, {}
 
     async def _persist(self) -> None:
         if self._message is None:
@@ -113,14 +144,14 @@ class ReactionRoleStore:
             )
         await self._message.edit(content=content)
 
-    def _read_file(self) -> dict[str, dict[str, int]]:
+    def _read_file(self) -> tuple[dict[str, dict[str, int]], dict[str, object]]:
         if not os.path.exists(self.path):
-            return {}
+            return {}, {}
         try:
             with open(self.path, encoding="utf-8") as f:
-                return json.load(f)
+                return self._split(json.load(f))
         except (json.JSONDecodeError, OSError):
-            return {}
+            return {}, {}
 
     def _write_file(self) -> None:
         directory = os.path.dirname(os.path.abspath(self.path))
@@ -128,7 +159,7 @@ class ReactionRoleStore:
         fd, tmp = tempfile.mkstemp(dir=directory, suffix=".tmp")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
+                json.dump(self._payload(), f, ensure_ascii=False, indent=2)
             os.replace(tmp, self.path)
         except BaseException:
             if os.path.exists(tmp):
